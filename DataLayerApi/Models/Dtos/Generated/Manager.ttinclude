@@ -1,0 +1,387 @@
+﻿<#@ assembly name="System.Core"#>
+<#@ assembly name="System.Data.Linq"#>
+<#@ assembly name="EnvDTE"#>
+<#@ assembly name="System.Xml"#>
+<#@ assembly name="System.Xml.Linq"#>
+<#@ import namespace="System.Collections.Generic"#>
+<#@ import namespace="System.IO"#>
+<#@ import namespace="System.Text"#>
+<#@ import namespace="Microsoft.VisualStudio.TextTemplating"#>
+<#@ import namespace="System.Runtime.InteropServices" #>
+<#@ import namespace="EnvDTE" #>
+<#+
+// https://raw.github.com/damieng/DamienGKit
+// http://damieng.com/blog/2009/11/06/multiple-outputs-from-t4-made-easy-revisited
+
+/// <sumary>
+/// Manager class records the various blocks so it can split them up.
+/// </sumary>
+public class Manager
+{
+    protected readonly Dictionary<string, string> GeneratedFileNames = new Dictionary<string, string>();
+    private readonly List<Block> files = new List<Block>();
+    private readonly Block footer = new Block();
+    private readonly Block header = new Block();
+    private readonly ITextTemplatingEngineHost host;
+    private readonly StringBuilder template;
+    private Block currentBlock;
+
+    private Manager(ITextTemplatingEngineHost host, StringBuilder template, LogOutput loger)
+    {
+        this.host = host;
+        this.template = template;
+		this.Loger = loger;
+    }
+
+	public LogOutput Loger { get; set; }
+
+    public virtual string DefaultProjectNamespace
+    {
+        get
+        {
+            return null;
+        }
+    }
+
+    private Block CurrentBlock
+    {
+        get
+        {
+            return this.currentBlock;
+        }
+
+        set
+        {
+            if (this.CurrentBlock != null)
+            {
+                this.EndBlock();
+            }
+
+            if (value != null)
+            {
+                value.Start = this.template.Length;
+            }
+
+            this.currentBlock = value;
+        }
+    }
+
+    public static Manager Create(ITextTemplatingEngineHost host, StringBuilder template, LogOutput loger)
+    {
+        return (host is IServiceProvider) ? new VSManager(host, template, loger) : new Manager(host, template, loger);
+    }
+
+    public void StartNewFile(string name, string parentName = null, bool overrideFile = true)
+    {
+        if (name == null)
+        {
+            throw new ArgumentNullException("name");
+        }
+		
+		this.Loger.WriteDelimiter();
+		this.Loger.WriteLine("Začátek nového souboru: {0}, Parent={1}, OverrideFile={2}", name, parentName, overrideFile);
+        this.CurrentBlock = new Block { Name = name, ParentName = parentName, OverrideFile = overrideFile };
+    }
+
+    public void StartFooter(bool includeInDefault = true)
+    {
+        this.CurrentBlock = this.footer;
+        this.footer.IncludeInDefault = includeInDefault;
+    }
+
+    public void StartHeader(bool includeInDefault = true)
+    {
+        this.CurrentBlock = this.header;
+        this.header.IncludeInDefault = includeInDefault;
+    }
+
+    public void EndBlock()
+    {
+        if (this.CurrentBlock == null)
+        {
+            return;
+        }
+
+        this.CurrentBlock.Length = this.template.Length - this.CurrentBlock.Start;
+
+        if (this.CurrentBlock != this.header && this.CurrentBlock != this.footer)
+        {
+            this.files.Add(this.CurrentBlock);
+        }
+
+        this.currentBlock = null;
+    }
+
+    public virtual void Process(bool split, bool sync = true)
+    {
+        if (split)
+        {
+			this.Loger.WriteDelimiter();
+			this.Loger.WriteLine("Začátek zpracování souborů...");
+            this.EndBlock();
+            string headerText = this.template.ToString(this.header.Start, this.header.Length);
+            string footerText = this.template.ToString(this.footer.Start, this.footer.Length);
+            string outputPath = Path.GetDirectoryName(this.host.TemplateFile);
+            this.files.Reverse();
+			var localStopWatch = default(DateTime);
+
+            if (!this.footer.IncludeInDefault)
+            {
+                this.template.Remove(this.footer.Start, this.footer.Length);
+            }
+
+            foreach (Block file in this.files)
+            {
+				localStopWatch = DateTime.Now;
+                string fileName = Path.Combine(outputPath, file.Name);
+                string content = headerText + this.template.ToString(file.Start, file.Length) + footerText;
+				var parentPath = !string.IsNullOrWhiteSpace(file.ParentName) ? Path.Combine(outputPath, file.ParentName) : null;
+                this.Loger.WriteLine("Soubor: {0}\r\n\tParent: {1}", fileName, parentPath);
+				this.GeneratedFileNames.Add(fileName, parentPath);
+                this.CreateFile(fileName, content, file.OverrideFile);
+                this.template.Remove(file.Start, file.Length);
+				this.Loger.WriteLine("\tČas zpracování: {0}", DateTime.Now - localStopWatch);
+            }
+
+            if (!this.header.IncludeInDefault)
+            {
+                this.template.Remove(this.header.Start, this.header.Length);
+            }
+        }
+    }
+
+    public virtual string GetCustomToolNamespace(string fileName)
+    {
+        return null;
+    }
+
+    protected virtual void CreateFile(string fileName, string content, bool overrideFile)
+    {
+        if (this.IsFileContentDifferent(fileName, content) && (!File.Exists(fileName) || overrideFile))
+        {
+            File.WriteAllText(fileName, content, Encoding.UTF8);
+        }
+    }
+
+    protected bool IsFileContentDifferent(string fileName, string newContent)
+    {
+        return !(File.Exists(fileName) && File.ReadAllText(fileName) == newContent);
+    }
+
+    private class Block
+    {
+        public string Name { get; set; }
+
+        public int Start { get; set; }
+
+        public int Length { get; set; }
+
+        public bool IncludeInDefault { get; set; }
+
+        public string ParentName { get; set; }
+
+        public bool OverrideFile { get; set; }
+    }
+
+    private class VSManager : Manager
+    {
+        private readonly EnvDTE.ProjectItem templateProjectItem;
+        private readonly EnvDTE.DTE dte;
+        private readonly Action<string> checkOutAction;
+        private readonly Action<Dictionary<string, string>> projectSyncAction;
+
+        internal VSManager(ITextTemplatingEngineHost host, StringBuilder template, LogOutput loger) : base(host, template, loger)
+        {
+            var hostServiceProvider = (IServiceProvider)host;
+
+            if (hostServiceProvider == null)
+            {
+                throw new ArgumentNullException("Could not obtain IServiceProvider");
+            }
+
+            this.dte = (EnvDTE.DTE)hostServiceProvider.GetService(typeof(EnvDTE.DTE));
+
+            if (this.dte == null)
+            {
+                throw new ArgumentNullException("Could not obtain DTE from host");
+            }
+
+            this.templateProjectItem = this.dte.Solution.FindProjectItem(host.TemplateFile);
+            this.checkOutAction = fileName => this.dte.SourceControl.CheckOutItem(fileName);
+            this.projectSyncAction = keepFileNames => VSManager.ProjectSync(this.templateProjectItem, keepFileNames, loger);
+        }
+
+        public override string DefaultProjectNamespace
+        {
+            get
+            {
+                return this.templateProjectItem.ContainingProject.Properties.Item("DefaultNamespace").Value.ToString();
+            }
+        }
+
+        public override string GetCustomToolNamespace(string fileName)
+        {
+            return this.dte.Solution.FindProjectItem(fileName).Properties.Item("CustomToolNamespace").Value.ToString();
+        }
+
+        public override void Process(bool split, bool sync)
+        {
+            if (this.templateProjectItem.ProjectItems == null)
+            {
+                return;
+            }
+
+            base.Process(split, sync);
+
+            if (sync)
+            {
+                this.projectSyncAction.Invoke(this.GeneratedFileNames);
+            }
+        }
+
+        protected override void CreateFile(string fileName, string content, bool overrideFile)
+        {
+            if (this.IsFileContentDifferent(fileName, content) && (!File.Exists(fileName) || overrideFile))
+            {
+                this.CheckoutFileIfRequired(fileName);
+                File.WriteAllText(fileName, content);
+            }
+        }
+
+        private static void ProjectSync(EnvDTE.ProjectItem templateProjectItem, Dictionary<string, string> keepFileNames, LogOutput loger)
+        {
+			loger.WriteLine("\r\nZačátek synchronizace projektu - přidání nebo odebrání souborů...");
+            var projectFiles = new Dictionary<string, EnvDTE.ProjectItem>();
+            var originalFilePrefix = Path.GetFileNameWithoutExtension(templateProjectItem.FileNames[0]) + ".";
+			var localStopWatch = DateTime.Now;
+
+            foreach (EnvDTE.ProjectItem projectItem in templateProjectItem.ProjectItems)
+            {
+				loger.WriteLine("Již v projektu: {0}",  projectItem.FileNames[0]);
+                projectFiles.Add(projectItem.FileNames[0], projectItem);
+            }
+			
+			loger.WriteDelimiter();
+			loger.WriteLine("Čas procházení složek: {0}", DateTime.Now - localStopWatch);
+			loger.WriteDelimiter();
+			localStopWatch = DateTime.Now;
+
+            // Remove unused items from the project
+            foreach (var pair in projectFiles)
+            {
+                if (!keepFileNames.ContainsKey(pair.Key) && !(Path.GetFileNameWithoutExtension(pair.Key) + ".").StartsWith(originalFilePrefix))
+                {
+					loger.WriteLine("\t\tDELETE z projektu: {0}",  pair.Key);
+                    pair.Value.Delete();
+                }
+            }
+
+			loger.WriteDelimiter();
+			loger.WriteLine("Čas DELETE položek z projektu: {0}", DateTime.Now - localStopWatch);
+			loger.WriteDelimiter();
+			localStopWatch = DateTime.Now;
+
+            // Add missing files to the project
+            foreach (var file in keepFileNames)
+            {
+				loger.WriteLine("Kontrola existence: {0}",  file.Key);
+
+                if (!projectFiles.ContainsKey(file.Key))
+                {
+					loger.WriteLine("\t\tChybí: {0}",  file.Key);
+					loger.WriteLine("\t\t\tChybí (Parent): {0}",  (!string.IsNullOrWhiteSpace(file.Value) ? file.Value : "NULL"));
+
+                    if (!string.IsNullOrWhiteSpace(file.Value) && projectFiles.ContainsKey(file.Value))
+                    {
+                        var added = projectFiles[file.Value].ProjectItems.AddFromFile(file.Key);
+						projectFiles.Add(file.Key, added);
+						loger.WriteLine("\t\tPřidáno do projektu: {0}",  file.Key);
+                    }
+                    else
+                    {
+                        var added = templateProjectItem.ProjectItems.AddFromFile(file.Key);
+						projectFiles.Add(file.Key, added);
+						loger.WriteLine("\t\tPřidáno do projektu: {0}",  file.Key);
+                    }
+                }
+            }
+			
+			loger.WriteDelimiter();
+			loger.WriteLine("Čas přidání položek do projektu: {0}", DateTime.Now - localStopWatch);
+			loger.WriteDelimiter();
+        }
+
+        private void CheckoutFileIfRequired(string fileName)
+        {
+            var sc = this.dte.SourceControl;
+
+            if (sc != null && sc.IsItemUnderSCC(fileName) && !sc.IsItemCheckedOut(fileName))
+            {
+				this.Loger.WriteLine("\tCheckOut souboru: {0}", fileName);
+                this.checkOutAction.Invoke(fileName);
+            }
+        }
+    }
+}
+
+/// <sumary>
+/// Třída pro logování do okna Output Visual Studia.
+/// </sumary>
+public class LogOutput
+{
+	private const string LineDelimiter = "--------------------------------------------------------------------------";
+
+    public LogOutput(IServiceProvider provider)
+    {
+		var dte1 = (DTE)GetCOMService(provider, typeof(DTE));
+		this.OutputWindow = (OutputWindow)dte1.Windows.Item(EnvDTE.Constants.vsWindowKindOutput).Object;
+
+		try  
+		{  
+			this.OutputWindowPane = this.OutputWindow.OutputWindowPanes.Item("DataModels Generovani");  
+		}  
+		catch  
+		{  
+			this.OutputWindowPane = this.OutputWindow.OutputWindowPanes.Add("DataModels Generovani");  
+		} 
+		
+		this.OutputWindowPane.Activate();
+    }
+
+    private OutputWindow OutputWindow { get; set; }
+	private OutputWindowPane OutputWindowPane { get; set; }
+
+	public void WriteLine(string text)
+    {
+		this.OutputWindowPane.OutputString(string.Format("\r\n{0}", text));
+	}
+
+	public void WriteLine(string format, params object[] texts)
+    {
+		this.OutputWindowPane.OutputString(string.Format("\r\n{0}", string.Format(format, texts)));
+	}
+
+	public void WriteDelimiter()
+    {
+		this.WriteLine(LineDelimiter);
+	}
+
+	private object GetCOMService(IServiceProvider provider, Type type)
+	{
+		object result = provider.GetService(type);
+		if (result == null)
+		{
+			return result;
+		}
+
+		try
+		{
+			return Marshal.GetObjectForIUnknown(Marshal.GetIUnknownForObject(result));
+		}
+		catch (Exception)
+		{
+			return result;
+		}
+	}
+}
+#>

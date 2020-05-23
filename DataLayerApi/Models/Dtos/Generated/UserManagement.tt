@@ -1,0 +1,108 @@
+﻿<#@ template debug="false" hostspecific="true" language="C#" #>
+<#@ assembly name="System" #>
+<#@ assembly name="System.Core" #>
+<#@ assembly name="System.Data" #>
+<#@ assembly name="System.Data.DataSetExtensions" #>
+<#@ import namespace="System" #>
+<#@ import namespace="System.Data" #>
+<#@ import namespace="System.Data.SqlClient" #>
+<#@ import namespace="System.Data.DataSetExtensions" #>
+<#@ import namespace="System.Diagnostics" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ assembly name="$(TargetPath)" #>
+<#@ import namespace="DataLayerApi.Configuration.EntityFramework.UserManagement" #>
+<#@ include file="Manager.ttinclude"#>
+<#@ include file="DataModelsSettingClasses.ttinclude" #>
+<#@ output extension=".cs" encoding="utf-8" #><#
+var loger = new LogOutput((IServiceProvider)this.Host);
+var enumFileNameFormat = "E{0}.cs"; 
+var dms = default(DataModelsSetting);
+var result = this.GetData(out dms);
+var manager = Manager.Create(Host, GenerationEnvironment, loger);
+string lastSchema = null;
+//var groupDataSeed = new GroupDataSeed();
+//var permissionDataSeed = new PermissionDataSeed();
+
+//var generatedData = groupDataSeed.GetEntities().Select(g => new { g.Id, Table = "Groups", g.Code, g.Name, g.Description })
+        //.Union(permissionDataSeed.GetEntities().Select(p => new { p.Id, Table = "Permissions", p.Code, p.Name, p.Description }));
+#>
+namespace DataLayerApi.Models.Dtos.V10.UserManagement
+{
+<#
+foreach (var enumItemType in result.Tables["Results"].Rows.Cast<DataRow>()
+							.Select(x => x.Field<string>("Table")).Distinct().ToArray())
+{
+		var rows = result.Tables["Results"].Rows.Cast<DataRow>()
+				.Where(x => x.Field<string>("Table") == enumItemType).ToArray();
+
+		if (rows.Length == 0 )
+		{
+			continue;
+		}
+#>
+    /// <summary>
+    /// Položky tabulky <#= enumItemType #>.
+    /// </summary>
+    public enum E<#=(enumItemType)#>
+    {
+<#
+		for(var i = 0; i < rows.Length; i++)
+		{
+			var itemId = rows[i].Field<int>("Id");
+			var itemCode = rows[i].Field<string>("Code").Trim();
+			var itemName = rows[i].Field<string>("Name").Trim();
+			var itemDescription = rows[i].Field<string>("Description");
+#>
+        /// <summary>
+        /// <#= itemName  #> - <#= itemDescription  #>.
+        /// </summary>
+        <#= itemCode  #> = <#= itemId  #>
+<#= (i < rows.Length - 1 ? ",\r\n" : string.Empty) #>
+<#
+		}
+#>
+    }
+
+<#
+	
+}#>
+}
+<#
+
+manager.Process(true);
+#><#+
+private DataSet GetData(out DataModelsSetting dms)
+{
+	var result = new DataSet("Result");
+	result.Tables.Add(new DataTable("Results"));
+	var path = Path.Combine(Path.GetDirectoryName(Host.TemplateFile), ".\\DataModels2.setting.xml");
+	dms = DataModelsSetting.FromFile(path);
+
+    var cmdText = @"SELECT
+	g.RoleId Id
+   ,'Roles' [Table]
+   ,g.NormalizedName Code
+   ,g.[Name] [Name]
+   ,ISNULL(g.[Title], '') [Description]
+FROM dbo.AspNetRoles g
+WHERE g.IsEnabled = 1";
+
+	using (var sqlCon = new SqlConnection(dms.ConnectionString))
+	{
+		using (var sqlCmd = new SqlCommand(cmdText, sqlCon))
+		{
+			sqlCmd.CommandType = CommandType.Text;
+			sqlCon.Open();
+
+            using (var sda = new SqlDataAdapter(sqlCmd))
+            {
+                sda.Fill(result.Tables["Results"]);
+            }
+        }
+    }
+
+	return result;
+}
+#>

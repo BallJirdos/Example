@@ -1,0 +1,325 @@
+﻿<#@ import namespace="System.Xml" #>
+<#@ import namespace="System.Xml.Serialization" #>
+<#+
+/*
+Soubor obsahuje třídy pro parsování XML s nastavením pro generování datamodelu a CRUD SP.
+*/
+
+/// <summary>
+/// Třída reprezentující nastavení pro generování DataModelu.
+/// </summary>
+[Serializable]
+[XmlRoot("DataModelsSetting")]
+public class DataModelsSetting
+{
+    /// <summary>
+    /// Connection string do DB, z které chceme generovat data model.
+    /// </summary>
+    [XmlAttribute(AttributeName = "ConnectionString")]
+    public string ConnectionString { get; set; }
+
+    /// <summary>
+    /// Seznam tabulek pro generování.
+    /// </summary>
+    [XmlArray("Tables")]
+    [XmlArrayItem("Table", Type = typeof(DMSTable))]
+    public List<DMSTable> Tables { get; set; }
+
+    /// <summary>
+    /// Metoda pro deserializace nastavení ze souboru obsahující XML.
+    /// </summary>
+    public static DataModelsSetting FromFile(string path)
+    {
+        using (var ms = new MemoryStream(Encoding.UTF8.GetBytes(File.ReadAllText(path))))
+        {
+            var deserializer = new XmlSerializer(typeof(DataModelsSetting));
+            return deserializer.Deserialize(ms) as DataModelsSetting;
+        }
+    }
+}
+
+/// <summary>
+/// Třída reprezentující nastavení pro generování na základě DB tabulky.
+/// </summary>
+[Serializable]
+[XmlRoot("Table")]
+public class DMSTable
+{
+    /// <summary>
+    /// Název tabulky.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Name")]
+    public string Name { get; set; }
+
+    /// <summary>
+    /// Prefix CRUD procedur.
+    /// </summary>
+    [XmlAttribute(AttributeName = "CrudPrefix")]
+    public string CrudPrefix { get; set; }
+
+    /// <summary>
+    /// Složka pro umístění vygenerovaných souborů.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Folder")]
+    public string Folder { get; set; }
+
+    /// <summary>
+    /// Příznak, zda se mají CRUD SP přepisovat.
+    /// </summary>
+    [XmlAttribute(AttributeName = "NotReplaceCRUD")]
+    public bool NotReplaceCRUD { get; set; }
+
+    /// <summary>
+    /// Příznak, zda se má generovat. Použito při generování konkrétního modelu.
+    /// </summary>
+    [XmlIgnore]
+    public bool DoGenerate { get; set; }
+
+    /// <summary>
+    /// Příznak, zda tabulka obsahuje sloupce ValidFrom a ValidTo.
+    /// </summary>
+    [XmlIgnore]
+    public bool HasValidFromAndTo { get; set; }
+
+    /// <summary>
+    /// Seznam vazeb.
+    /// </summary>
+    [XmlArray("Joins")]
+    [XmlArrayItem("Join", Type = typeof(DMSJoin))]
+    public List<DMSJoin> Joins { get; set; }
+
+    /// <summary>
+    /// Přidané další vstupní parametry jako filtry pro použití v mapperu.
+    /// </summary>
+    [XmlArray("ExtendInFilters")]
+    [XmlArrayItem("Item", Type = typeof(DMSItem))]
+    public List<DMSItem> ExtendInFilters { get; set; }
+
+    /// <summary>
+    /// Seznam filtrů pro generování.
+    /// </summary>
+    [XmlArray("Filters")]
+    [XmlArrayItem("Item", Type = typeof(DMSItem))]
+    public List<DMSItem> Filters { get; set; }
+
+    /// <summary>
+    /// Seznam oprávnění pro generování.
+    /// </summary>
+    [XmlArray("Rights")]
+    [XmlArrayItem("Right", Type = typeof(DMSRight))]
+    public List<DMSRight> Rights { get; set; }
+
+    /// <summary>
+    /// Seznam filtrů pro generování pouze pro CRUD SP.
+    /// </summary>
+    [XmlIgnore]
+    public IEnumerable<DMSItem> FiltersOnlyCRUD
+    {
+        get
+        {
+            if (this.OrderBy.Count > 0)
+            {
+                foreach (var item in this.Filters)
+                {
+                    if (!item.NotInCRUD)
+                    {
+                        yield return item;
+                    }
+                }
+            }
+            else
+            {
+                yield return new DMSItem { Name = "Id", SqlType = "INT", Alias = "t", Column = "Id", Operator = "=" };
+            }
+        }
+    }
+
+    /// <summary>
+    /// Řazení pro generování.
+    /// </summary>
+    [XmlArray("OrderBy")]
+    [XmlArrayItem("Item", Type = typeof(DMSItem))]
+    public List<DMSItem> OrderBy { get; set; }
+
+    /// <summary>
+    /// Řazení pro generování pouze pro CRUD SP.
+    /// </summary>
+    [XmlIgnore]
+    public IEnumerable<DMSItem> OrderByOnlyCRUD
+    {
+        get
+        {
+            if (this.OrderBy.Count > 0)
+            {
+                foreach (var item in this.OrderBy)
+                {
+                    if (!item.NotInCRUD)
+                    {
+                        yield return item;
+                    }
+                }
+            }
+            else
+            {
+                yield return new DMSItem { Name = "Id", SqlType = "INT", Alias = "t", Column = "Id", Operator = "=" };
+            }
+        }
+    }
+}
+
+/// <summary>
+/// Třída reprezentující položku.
+/// </summary>
+[Serializable]
+[XmlRoot("Join")]
+public class DMSJoin
+{
+    /// <summary>
+    /// Typ vazby.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Type")]
+    public string Type { get; set; }
+
+    /// <summary>
+    /// Název tabulky uvedené za JOIN.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Table")]
+    public string Table { get; set; }
+
+    /// <summary>
+    /// Alias tabulky uvedené za JOIN.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Alias")]
+    public string Alias { get; set; }
+
+    /// <summary>
+    /// Název sloupce tabulky uvedené za JOIN.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Column")]
+    public string Column { get; set; }
+
+    /// <summary>
+    /// Název tabulky, která slouží jako podmínka za ON.
+    /// </summary>
+    [XmlAttribute(AttributeName = "OnTable")]
+    public string OnTable { get; set; }
+
+    /// <summary>
+    /// Alias tabulky, která slouží jako podmínka za ON.
+    /// </summary>
+    [XmlAttribute(AttributeName = "OnAlias")]
+    public string OnAlias { get; set; }
+
+    /// <summary>
+    /// Název sloupce tabulky, který slouží jako podmínka za ON.
+    /// </summary>
+    [XmlAttribute(AttributeName = "OnColumn")]
+    public string OnColumn { get; set; }
+}
+
+/// <summary>
+/// Třída reprezentující položku.
+/// </summary>
+[Serializable]
+[XmlRoot("Item")]
+public class DMSItem
+{
+    /// <summary>
+    /// Název tabulky.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Name")]
+    public string Name { get; set; }
+
+    /// <summary>
+    /// SQL typ položky.
+    /// </summary>
+    [XmlAttribute(AttributeName = "SqlType")]
+    public string SqlType { get; set; }
+
+    /// <summary>
+    /// Popis položky.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Description")]
+    public string Description { get; set; }
+
+    /// <summary>
+    /// Alias tabulky.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Alias")]
+    public string Alias { get; set; }
+
+    /// <summary>
+    /// Název sloupce.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Column")]
+    public string Column { get; set; }
+
+    /// <summary>
+    /// Název sloupce.
+    /// </summary>
+    [XmlAttribute(AttributeName = "NotInCRUD")]
+    public bool NotInCRUD { get; set; }
+
+    /// <summary>
+    /// Operátor mezi sloupci ON podmínky.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Operator")]
+    public string Operator { get; set; }
+
+    /// <summary>
+    /// Vlastní podmínka filtru pro extrémní případy.
+    /// </summary>
+    [XmlAttribute(AttributeName = "CustomCond")]
+    public string CustomCond { get; set; }
+}
+
+/// <summary>
+/// Třída reprezentující oprávnění.
+/// </summary>
+[Serializable]
+[XmlRoot("Right")]
+public class DMSRight
+{
+    /// <summary>
+    /// Typ SP.
+    /// </summary>
+    [XmlAttribute(AttributeName = "CRUD")]
+    public string CRUD { get; set; }
+
+    /// <summary>
+    /// Typ operace.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Operation")]
+    public string Operation { get; set; }
+
+    /// <summary>
+    /// Název AppRole.
+    /// </summary>
+    [XmlAttribute(AttributeName = "AppRole")]
+    public string AppRole { get; set; }
+
+    /// <summary>
+    /// Název Right.
+    /// </summary>
+    [XmlAttribute(AttributeName = "Right")]
+    public string Right { get; set; }
+
+    /// <summary>
+    /// Potřebuje limit?
+    /// </summary>
+    [XmlAttribute(AttributeName = "NeedLimit")]
+    public string NeedLimit { get; set; }
+
+    /// <summary>
+    /// Potřebuje normal?
+    /// </summary>
+    [XmlAttribute(AttributeName = "NeedNormal")]
+    public string NeedNormal { get; set; }
+
+    /// <summary>
+    /// Potřebuje power?
+    /// </summary>
+    [XmlAttribute(AttributeName = "NeedPower")]
+    public string NeedPower { get; set; }
+}
+#>
